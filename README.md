@@ -108,7 +108,7 @@ timer.
 The battery switch can't be read directly, so the board looks at the battery
 voltage while on USB. A connected LiPo holds a steady voltage. With the switch
 off, the charger's output wobbles by tenths of a volt and goes above 4.3 V.
-Charging mode starts after about 5 seconds of steady readings and ends as soon as
+Charging mode starts after about 10 seconds of steady readings and ends as soon as
 USB is unplugged. The thresholds are in the `CHARGING MODE` settings.
 
 ### Low battery warning

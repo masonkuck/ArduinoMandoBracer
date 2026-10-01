@@ -133,8 +133,11 @@ CHARGING_MODE = True
 # readings (one every POWER_SAMPLE_SECONDS) stay within
 # BATTERY_STEADY_VOLTS of each other and below BATTERY_MAX_VOLTS.
 POWER_SAMPLE_SECONDS = 0.5
-POWER_SAMPLES = 10
-BATTERY_STEADY_VOLTS = 0.05
+# Measured on USB: a connected battery read within 0.00 V over
+# 10 s; with the battery off, 10 s windows spread at least 0.07 V
+# (over 5 s it sometimes settled to 0.03 V, hence the 10 s window).
+POWER_SAMPLES = 20
+BATTERY_STEADY_VOLTS = 0.02
 BATTERY_MAX_VOLTS = 4.30
 
 # Print every power reading (testing).
@@ -1236,11 +1239,14 @@ def read_metadata(folder):
 # LOAD ANIMATION
 # ============================================================
 #
-# Loads every frame into RAM when it fits, so playback is only
-# limited by the display SPI (~23 ms per RGB444 frame). Reading
-# from the SD card manages ~150 ms per frame at best.
+# Play while loading: frames are read from the card one at a time
+# as the first loop plays, and kept in RAM. The animation starts
+# straight away; reading a frame takes ~150 ms, so the first loop
+# runs slower, and later loops play from RAM at full speed (only
+# limited by the display SPI, ~13 ms per RGB444 frame).
 #
-# If it doesn't fit, frames are streamed from the card instead.
+# If RAM runs out, the frames read so far are dropped and every
+# loop streams from the card instead.
 #
 
 def load_animation(name):
@@ -1262,27 +1268,9 @@ def load_animation(name):
         [100] * frame_count
     )
 
-    animation = {
-        "name": name,
-        "path": folder + "/" + metadata["file"],
-        "colmod": colmod,
-        "frame_size": frame_size,
-        "frame_count": frame_count,
-        "durations_ns": [
-            int(d) * 1000000
-            for d in durations
-        ],
-        "frames": None,
-        "icon_rows": battery_icon_rows(colmod),
-        # Warning colour currently painted into the frames.
-        "icon_color": None,
-        # Original pixels under the symbol, one per frame.
-        "icon_backup": None,
-    }
+    path = folder + "/" + metadata["file"]
 
     gc.collect()
-
-    needed = frame_size * frame_count
 
     print()
     print(
@@ -1291,67 +1279,174 @@ def load_animation(name):
         "(" + metadata["format"] + ",",
         frame_count,
         "frames,",
-        needed // 1024,
+        frame_size * frame_count // 1024,
         "KB, free RAM",
         gc.mem_free() // 1024,
         "KB)"
     )
 
-    # gc.mem_free() under-reports on ESP32-S3 because the heap
-    # grows on demand, so just try and fall back on MemoryError.
-    start = time.monotonic()
+    return {
+        "name": name,
+        "path": path,
+        "colmod": colmod,
+        "frame_size": frame_size,
+        "frame_count": frame_count,
+        "durations_ns": [
+            int(d) * 1000000
+            for d in durations
+        ],
+        # Frames read into RAM so far; None when streaming.
+        "frames": [],
+        # Open while frames are still to be read, or when streaming.
+        "file": open(path, "rb"),
+        # Frame buffer when streaming.
+        "buffer": None,
+        "load_started": time.monotonic(),
+        "timing_reported": False,
+        "icon_rows": battery_icon_rows(colmod),
+        # Warning colour currently painted into the frames.
+        "icon_color": None,
+        # Original pixels under the symbol, one per frame.
+        "icon_backup": None,
+    }
 
-    try:
 
-        frames = []
+def close_animation(animation):
 
-        with open(
-            animation["path"],
-            "rb"
-        ) as f:
+    if animation is not None and animation["file"] is not None:
 
-            for _ in range(frame_count):
+        animation["file"].close()
+        animation["file"] = None
 
-                # Stop reading the card as soon as charging starts.
-                update_power()
 
-                if charging:
+def fully_loaded(animation):
 
-                    print("Loading stopped: charging")
+    frames = animation["frames"]
 
-                    return None
+    return (
+        frames is not None
+        and
+        len(frames) == animation["frame_count"]
+    )
 
-                frame = bytearray(
-                    frame_size
-                )
 
-                read_fully(
-                    f,
-                    frame
-                )
+# Out of RAM: drop the frames read so far and stream every frame
+# from the card from now on.
+def start_streaming(animation, frame_number):
 
-                frames.append(
-                    frame
-                )
+    print(
+        "Ran out of RAM after",
+        len(animation["frames"]),
+        "frames, streaming from SD (slow)"
+    )
 
-        animation["frames"] = frames
+    animation["frames"] = None
+    animation["icon_backup"] = None
+    animation["icon_color"] = None
 
-        print(
-            "Loaded into RAM in {:.1f} s".format(
-                time.monotonic() - start
+    gc.collect()
+
+    animation["buffer"] = bytearray(
+        animation["frame_size"]
+    )
+
+    animation["file"].seek(
+        frame_number * animation["frame_size"]
+    )
+
+
+def get_frame(animation, frame_number):
+
+    frames = animation["frames"]
+
+    if frames is not None:
+
+        if frame_number < len(frames):
+
+            return frames[frame_number]
+
+        # Not read yet: frames are read in order, so this is the
+        # next one in the file.
+        try:
+
+            frame = bytearray(
+                animation["frame_size"]
             )
+
+        except MemoryError:
+
+            start_streaming(
+                animation,
+                frame_number
+            )
+
+            return get_frame(
+                animation,
+                frame_number
+            )
+
+        read_fully(
+            animation["file"],
+            frame
         )
 
-    except MemoryError:
+        # Keep the low battery symbol consistent with the frames
+        # read earlier.
+        rows = animation["icon_rows"]
 
-        frames = None
-        gc.collect()
+        if animation["icon_backup"] is not None:
 
-        print(
-            "Ran out of RAM, streaming from SD (slow)"
+            animation["icon_backup"].append(
+                copy_icon_area(frame, rows)
+            )
+
+        if animation["icon_color"] is not None:
+
+            paint_icon_area(
+                frame,
+                rows,
+                battery_icons[(animation["icon_color"], animation["colmod"])]
+            )
+
+        frames.append(
+            frame
         )
 
-    return animation
+        if len(frames) == animation["frame_count"]:
+
+            close_animation(
+                animation
+            )
+
+            print(
+                "Loaded into RAM in {:.1f} s".format(
+                    time.monotonic() - animation["load_started"]
+                )
+            )
+
+        return frame
+
+    # Streaming from the card.
+    if frame_number == 0:
+
+        animation["file"].seek(0)
+
+    buffer = animation["buffer"]
+
+    read_fully(
+        animation["file"],
+        buffer
+    )
+
+    if battery_warning is not None:
+
+        paint_icon_area(
+            buffer,
+            animation["icon_rows"],
+            battery_icons[(battery_warning, animation["colmod"])]
+        )
+
+    return buffer
 
 
 def read_fully(f, buffer):
@@ -1378,7 +1473,7 @@ def read_fully(f, buffer):
 # PLAY ANIMATION (one loop)
 # ============================================================
 
-def play_animation(animation, report_timing):
+def play_animation(animation):
 
     global advance_requested
 
@@ -1392,23 +1487,18 @@ def play_animation(animation, report_timing):
         animation
     )
 
-    frames = animation["frames"]
     durations_ns = animation["durations_ns"]
     frame_count = animation["frame_count"]
 
-    stream = None
-    buffer = None
-
-    if frames is None:
-
-        stream = open(
-            animation["path"],
-            "rb"
-        )
-
-        buffer = bytearray(
-            animation["frame_size"]
-        )
+    # Report timing once, for the first loop that doesn't include
+    # loading (or the first loop when streaming).
+    report_timing = (
+        PRINT_TIMING
+        and
+        not animation["timing_reported"]
+        and
+        (fully_loaded(animation) or animation["frames"] is None)
+    )
 
     read_ns_total = 0
     send_ns_total = 0
@@ -1418,95 +1508,73 @@ def play_animation(animation, report_timing):
     # per-frame overheads don't add up into drift.
     next_frame_ns = time.monotonic_ns()
 
-    try:
+    for frame_number in range(frame_count):
 
-        for frame_number in range(frame_count):
+        read_start_ns = time.monotonic_ns()
 
-            read_start_ns = time.monotonic_ns()
+        frame = get_frame(
+            animation,
+            frame_number
+        )
 
-            if stream is None:
+        send_start_ns = time.monotonic_ns()
 
-                frame = frames[frame_number]
+        display_bus.send(
+            0x2C,
+            frame
+        )
 
-            else:
+        send_end_ns = time.monotonic_ns()
 
-                read_fully(
-                    stream,
-                    buffer
-                )
+        update_battery_warning()
 
-                if battery_warning is not None:
+        update_power()
 
-                    paint_icon_area(
-                        buffer,
-                        animation["icon_rows"],
-                        battery_icons[(battery_warning, animation["colmod"])]
-                    )
+        # Stop mid-loop so the bus goes quiet right away.
+        if charging:
 
-                frame = buffer
+            return
 
-            send_start_ns = time.monotonic_ns()
+        if button_pressed():
 
-            display_bus.send(
-                0x2C,
-                frame
+            advance_requested = True
+
+            return
+
+        read_ns_total += send_start_ns - read_start_ns
+        send_ns_total += send_end_ns - send_start_ns
+
+        next_frame_ns += durations_ns[frame_number]
+
+        wait_ns = next_frame_ns - time.monotonic_ns()
+
+        if wait_ns > 0:
+
+            time.sleep(
+                wait_ns / 1000000000
             )
 
-            send_end_ns = time.monotonic_ns()
+        else:
 
-            update_battery_warning()
+            late_frames += 1
 
-            update_power()
-
-            # Stop mid-loop so the bus goes quiet right away.
-            if charging:
-
-                return
-
-            if button_pressed():
-
-                advance_requested = True
-
-                return
-
-            read_ns_total += send_start_ns - read_start_ns
-            send_ns_total += send_end_ns - send_start_ns
-
-            next_frame_ns += durations_ns[frame_number]
-
-            wait_ns = next_frame_ns - time.monotonic_ns()
-
-            if wait_ns > 0:
-
-                time.sleep(
-                    wait_ns / 1000000000
-                )
-
-            else:
-
-                late_frames += 1
-
-                # Too far behind: resync instead of rushing
-                # through frames to catch up.
-                if -wait_ns > durations_ns[frame_number]:
-
-                    next_frame_ns = time.monotonic_ns()
-
-            if DEVELOPMENT_MODE:
-
-                time.sleep(
-                    USB_IDLE_SECONDS
-                )
+            # Too far behind: resync instead of rushing
+            # through frames to catch up.
+            if -wait_ns > durations_ns[frame_number]:
 
                 next_frame_ns = time.monotonic_ns()
 
-    finally:
+        if DEVELOPMENT_MODE:
 
-        if stream is not None:
+            time.sleep(
+                USB_IDLE_SECONDS
+            )
 
-            stream.close()
+            next_frame_ns = time.monotonic_ns()
 
-    if report_timing and PRINT_TIMING:
+    if report_timing:
+
+        animation["timing_reported"] = True
 
         read_ms = read_ns_total / frame_count / 1000000
         send_ms = send_ns_total / frame_count / 1000000
@@ -1550,6 +1618,7 @@ while True:
     if charging:
 
         # Free the animation; it's reloaded after charging.
+        close_animation(current)
         current = None
         gc.collect()
 
@@ -1597,31 +1666,19 @@ while True:
         ):
 
             # Free the previous animation before loading.
+            close_animation(current)
             current = None
             gc.collect()
 
+            # Only opens the file: the frames are read while the
+            # first loop plays.
             current = load_animation(
                 name
             )
 
-            # Charging started while loading: load this one again
-            # afterwards.
-            if current is None:
-
-                next_index -= 1
-                gc.collect()
-
-                continue
-
             current_signature = animations[name]
 
-            first_loop = True
-
-        else:
-
-            first_loop = False
-
-        # Presses while loading don't count.
+        # Presses before this animation starts don't count.
         button_pressed()
         advance_requested = False
 
@@ -1645,11 +1702,8 @@ while True:
         while True:
 
             play_animation(
-                current,
-                first_loop
+                current
             )
-
-            first_loop = False
 
             if charging:
 
@@ -1681,6 +1735,7 @@ while True:
             e
         )
 
+        close_animation(current)
         current = None
         gc.collect()
 
