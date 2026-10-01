@@ -138,6 +138,9 @@ POWER_SAMPLE_SECONDS = 0.5
 # (over 5 s it sometimes settled to 0.03 V, hence the 10 s window).
 POWER_SAMPLES = 20
 BATTERY_STEADY_VOLTS = 0.02
+# Once charging, it only stops when the readings spread more than
+# this (or USB is unplugged), so a busy board stays in charging mode.
+BATTERY_UNSTEADY_VOLTS = 0.06
 BATTERY_MAX_VOLTS = 4.30
 
 # Print every power reading (testing).
@@ -612,8 +615,17 @@ def update_power():
         lowest = min(power_samples)
         highest = max(power_samples)
 
+        # Strict to start charging, loose to stop: while copying
+        # files the board draws more current and the battery reading
+        # moves a little, which must not end charging mode.
+        allowed_spread = (
+            BATTERY_UNSTEADY_VOLTS
+            if charging
+            else BATTERY_STEADY_VOLTS
+        )
+
         battery_connected = (
-            highest - lowest <= BATTERY_STEADY_VOLTS
+            highest - lowest <= allowed_spread
             and
             highest <= BATTERY_MAX_VOLTS
         )
@@ -1374,6 +1386,10 @@ def get_frame(animation, frame_number):
             )
 
         except MemoryError:
+
+            # Let go of the frames list here too, or gc can't free it
+            # and the streaming buffer can't be allocated.
+            frames = None
 
             start_streaming(
                 animation,
