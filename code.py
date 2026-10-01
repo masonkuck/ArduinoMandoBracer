@@ -230,15 +230,45 @@ vfs = storage.VfsFat(
     sd
 )
 
-# Mounted read-only for CircuitPython so the PC gets write
-# access to the card over USB. The board only reads frames.
-storage.mount(
-    vfs,
-    "/sd",
-    readonly=True
-)
+# Only one side may write to the card: mounted read-only for
+# code.py, the PC can write over USB; mounted writable for
+# code.py, the PC sees it read-only. code.py itself never writes.
+#
+# Windows writes to any writable drive it sees (its dirty flag,
+# System Volume Information). Those writes going through the
+# board while frames streamed over the same SPI bus wiped the
+# card's root folder. So the PC only gets write access while
+# nothing reads the card: in charging mode and COPY_MODE.
+sd_pc_writable = None
 
-print("SD mounted")
+
+def mount_sd(pc_writable):
+
+    global sd_pc_writable
+
+    if pc_writable == sd_pc_writable:
+
+        return
+
+    if sd_pc_writable is not None:
+
+        storage.umount("/sd")
+
+    storage.mount(
+        vfs,
+        "/sd",
+        readonly=pc_writable
+    )
+
+    sd_pc_writable = pc_writable
+
+    print(
+        "SD mounted, PC access:",
+        "read/write" if pc_writable else "read-only"
+    )
+
+
+mount_sd(COPY_MODE)
 
 if COPY_MODE:
 
@@ -335,6 +365,101 @@ def set_full_window():
 
 
 set_full_window()
+
+
+# ============================================================
+# STARTUP IMAGE
+# ============================================================
+#
+# Until the first animation frame, the panel would show whatever
+# is left in its memory (static), for 10+ s on USB while the
+# battery check runs. So straight after setup it shows
+# SPLASH_FILE from the CIRCUITPY drive, made with:
+#
+#   GifConverter logo.png --splash -r 180 -o G:\
+#
+# The pixel format comes from the file size. Without the file
+# the screen is cleared to black instead.
+#
+
+SPLASH_FILE = "/splash.bin"
+
+
+def read_splash():
+
+    try:
+
+        size = os.stat(SPLASH_FILE)[6]
+
+    except OSError:
+
+        # No startup image.
+        return None, None
+
+    for colmod, frame_size in PIXEL_FORMATS.values():
+
+        if size == frame_size:
+
+            image = bytearray(frame_size)
+            view = memoryview(image)
+            offset = 0
+
+            with open(SPLASH_FILE, "rb") as f:
+
+                while offset < frame_size:
+
+                    n = f.readinto(view[offset:])
+
+                    if not n:
+
+                        break
+
+                    offset += n
+
+            if offset == frame_size:
+
+                return image, colmod
+
+    print(
+        "Startup image skipped:",
+        SPLASH_FILE,
+        "is",
+        size,
+        "bytes, not a 240x320 frame"
+    )
+
+    return None, None
+
+
+def show_splash():
+
+    # Display off while drawing, so the static is never seen.
+    display_bus.send(0x28, b"")
+
+    image, colmod = read_splash()
+
+    if image is None:
+
+        # All zeros is black in either format.
+        colmod, frame_size = PIXEL_FORMATS["RGB444"]
+        image = bytearray(frame_size)
+
+    display_bus.send(
+        0x3A,
+        bytes([colmod])
+    )
+
+    display_bus.send(
+        0x2C,
+        image
+    )
+
+    display_bus.send(0x29, b"")
+
+
+show_splash()
+
+gc.collect()
 
 
 # ============================================================
@@ -951,6 +1076,9 @@ def read_percent():
 # battery is switched off.
 def run_charging_mode():
 
+    # Nothing reads the card now, so the PC may copy files.
+    mount_sd(True)
+
     shown_percent = -1
     full_redraw = True
 
@@ -982,6 +1110,10 @@ def run_charging_mode():
 
     # Playback writes whole frames again.
     set_full_window()
+
+    # Playback reads the card again: take write access away from
+    # the PC first. A copy still running now is cut off.
+    mount_sd(False)
 
 
 def battery_icon_rows(colmod):

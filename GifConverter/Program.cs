@@ -11,6 +11,8 @@ using System.Text.Json;
 // Converts animated GIFs into raw frames for the ST7789 240x320
 // panel driven by code.py. All frames go into one frames.bin so
 // the Feather can load the whole animation into RAM in one read.
+// With --splash, any still image becomes splash.bin, the image
+// code.py shows while the system starts up.
 //
 // Every output frame is always 240 x 320 in the panel's native
 // portrait memory order. Rotation is baked into the pixels here,
@@ -88,6 +90,9 @@ sealed class Options
     public Color Background { get; private set; } = Color.Black;
     public ColorFormat Format { get; private set; } = ColorFormat.Rgb444;
     public bool Dither { get; private set; } = false;
+    // Write one still frame as splash.bin (startup image) instead
+    // of a <name>_frames animation.
+    public bool Splash { get; private set; } = false;
     public bool ShowHelp { get; private set; }
 
     public static void PrintHelp()
@@ -95,10 +100,12 @@ sealed class Options
         Console.WriteLine(
             """
             GifConverter - convert animated GIFs to raw frames for the
-            ST7789 240x320 display (FeatherS3 + code.py).
+            ST7789 240x320 display (FeatherS3 + code.py). Still images
+            (PNG, JPEG, BMP, ...) work too, e.g. for the startup image.
 
             USAGE
               GifConverter <input.gif> [more.gif ...] [options]
+              GifConverter <image.png> --splash -o G:\
 
             OPTIONS
               -r, --rotation <deg>    How the GIF is turned on the panel:
@@ -141,16 +148,25 @@ sealed class Options
               -d, --delay <ms>        Frame delay used when the GIF has none.
                                       Default: 100.
 
+              --splash                Make the startup image instead of an
+                                      animation: the first frame is written
+                                      to splash.bin in the output folder.
+                                      Copy it to the CIRCUITPY drive (G:\).
+                                      Portrait images are upside down on the
+                                      bracer unless you add -r 180.
+
               -h, --help              Show this help.
 
             OUTPUT
               <name>_frames/animation.json  metadata read by code.py
               <name>_frames/frames.bin      all 240x320 frames, back to back
+              splash.bin                    with --splash: one 240x320 frame
 
             EXAMPLES
               GifConverter steve-minecraft.gif
               GifConverter bridget.gif -r 270 -f cover -o H:\
               GifConverter *.gif --smooth --dither
+              GifConverter logo.png --splash -r 180 --smooth -o G:\
             """
         );
     }
@@ -220,6 +236,10 @@ sealed class Options
 
                 case "--dither":
                     options.Dither = true;
+                    break;
+
+                case "--splash":
+                    options.Splash = true;
                     break;
 
                 case "-b":
@@ -336,12 +356,18 @@ static class Converter
         string outputParent = options.OutputDirectory
             ?? Path.GetDirectoryName(Path.GetFullPath(inputFile))!;
 
-        string outputDirectory = Path.Combine(outputParent, name + "_frames");
+        // A splash image is a single file, written straight into the
+        // output folder (normally the CIRCUITPY drive).
+        string outputDirectory = options.Splash
+            ? outputParent
+            : Path.Combine(outputParent, name + "_frames");
 
+        // Any format GDI+ reads: GIF, PNG, JPEG, BMP, TIFF.
         using var gif = Image.FromFile(inputFile);
 
         var dimension = new FrameDimension(gif.FrameDimensionsList[0]);
-        int frameCount = gif.GetFrameCount(dimension);
+        int sourceFrames = gif.GetFrameCount(dimension);
+        int frameCount = options.Splash ? 1 : sourceFrames;
         int[] delays = ReadFrameDelays(gif, frameCount, options.DefaultDelayMs);
 
         // The canvas has the dimensions the viewer sees. Landscape
@@ -355,7 +381,12 @@ static class Converter
 
         Rectangle destination = FitRectangle(gif.Width, gif.Height, canvasWidth, canvasHeight, options.Fit);
 
-        Console.WriteLine($"Input:      {inputFile} ({gif.Width}x{gif.Height}, {frameCount} frames)");
+        Console.WriteLine($"Input:      {inputFile} ({gif.Width}x{gif.Height}, {sourceFrames} frame{(sourceFrames == 1 ? "" : "s")})");
+
+        if (options.Splash && sourceFrames > 1)
+        {
+            Console.WriteLine("Splash:     using the first frame only");
+        }
         Console.WriteLine($"Rotation:   {rotation} degrees{(options.Rotation == null ? " (auto)" : "")}");
         Console.WriteLine($"Fit:        {options.Fit.ToString().ToLowerInvariant()}, {(options.Smooth ? "smooth" : "nearest")} scaling");
         Console.WriteLine($"Color:      {FormatName(options.Format)}{(options.Dither && options.Format == ColorFormat.Rgb444 ? ", dithered" : "")}");
@@ -365,7 +396,7 @@ static class Converter
 
         // Everything is written to .tmp files and swapped in at the
         // end, so the Feather never reads a half-written animation.
-        string framesFile = Path.Combine(outputDirectory, "frames.bin");
+        string framesFile = Path.Combine(outputDirectory, options.Splash ? "splash.bin" : "frames.bin");
         string metadataFile = Path.Combine(outputDirectory, "animation.json");
 
         int frameSize = FrameSize(options.Format, panelWidth, panelHeight);
@@ -425,6 +456,16 @@ static class Converter
         framesStream.Dispose();
 
         Console.WriteLine();
+
+        // code.py tells the pixel format from the file size, so a
+        // splash image needs no animation.json.
+        if (options.Splash)
+        {
+            File.Move(framesFile + ".tmp", framesFile, overwrite: true);
+
+            Console.WriteLine($"Done:       {framesFile} ({FormatName(options.Format)}, {frameSize} bytes)");
+            return;
+        }
 
         var metadata = new
         {

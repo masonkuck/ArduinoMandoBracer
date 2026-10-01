@@ -80,8 +80,27 @@ for at least 30 seconds (`MIN_PLAY_SECONDS`). Frames are loaded into RAM first,
 so each frame takes only about 13 ms to send. Animations that don't fit in RAM
 are streamed from the card instead, which is much slower.
 
-The card is mounted **read-only** for the board, so the PC can write to it over
-USB: it shows up as a second drive next to `CIRCUITPY`.
+The card also shows up on the PC as a second drive next to `CIRCUITPY`. The PC
+can only write to it in charging mode (or `COPY_MODE`). While animations play,
+it is read-only on the PC: Windows writes to any writable drive it sees, and
+those writes landing while frames stream over the shared SPI bus wiped the
+card's folder list.
+
+### Startup image
+
+While the board starts up (about 10 seconds on USB while it checks the
+battery), the screen shows `splash.bin` from the `CIRCUITPY` drive instead of
+static. Make one from any image (PNG, JPEG, BMP or GIF):
+
+```
+dotnet run --project GifConverter -c Release -- logo.png --splash -r 180 --smooth -o G:\
+```
+
+- `-r 180` keeps portrait images upright on the bracer, the same as Bridget.
+  Landscape images are turned 90° automatically.
+- Transparent areas become the background colour: black, or set it with
+  `-b RRGGBB`.
+- Without `splash.bin`, the screen just stays black until the first animation.
 
 ### Button mode
 
@@ -120,9 +139,10 @@ flicker, and it is hidden on USB power.
 
 ## Adding animations
 
-**Only copy files to the SD card while the board is in charging mode.** The
-display and SD card share the SPI bus. Files copied while an animation is
-playing arrive corrupted, with parts of the file landing in the wrong place.
+**Files can only be copied to the SD card while the board is in charging
+mode.** The display and SD card share the SPI bus, so the card is read-only on
+the PC while animations play. Leaving charging mode (switching the battery off)
+takes write access away again, so let a copy finish first.
 
 1. Plug in USB with the battery switch **on** and wait for the charging screen.
 2. Convert straight onto the card, or copy the `_frames` folder over:
