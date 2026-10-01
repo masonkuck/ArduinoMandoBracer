@@ -53,3 +53,18 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# Animations: source GIFs and converted *_frames folders.
+# Keep everything in animations/ out of git except the placeholder.
+animations/*
+!animations/.gitkeep
+
+# GifConverter build output
+GifConverter/bin/
+GifConverter/obj/
+
+# Python bytecode
+__pycache__/
+
+# Claude Code worktrees
+.claude/worktrees/

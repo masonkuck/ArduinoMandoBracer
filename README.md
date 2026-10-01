@@ -7,6 +7,7 @@ loaded into RAM by the board and pushed to the display as fast as SPI allows.
 
 - `code.py` – the CircuitPython program (copy to the `CIRCUITPY` drive).
 - `GifConverter/` – .NET console app that turns GIFs into frame files.
+- `animations/` – your GIFs and their converted frames (ignored by git).
 
 ## Hardware
 
@@ -54,11 +55,14 @@ Used on the board itself, no wiring needed:
 
 ### Converting GIFs
 
+Keep GIFs in the `animations/` folder. Git ignores everything in it, so
+GIFs and converted frames never get committed.
+
 ```
-dotnet run --project GifConverter -c Release -- my.gif
+dotnet run --project GifConverter -c Release -- animations/my.gif
 ```
 
-This writes `my_frames/` next to the GIF:
+This writes `animations/my_frames/` next to the GIF:
 
 - `frames.bin` – every frame, back to back, as raw 240x320 pixels.
 - `animation.json` – frame count, pixel format and per-frame delays.
@@ -123,7 +127,7 @@ playing arrive corrupted, with parts of the file landing in the wrong place.
 1. Plug in USB with the battery switch **on** and wait for the charging screen.
 2. Convert straight onto the card, or copy the `_frames` folder over:
    ```
-   dotnet run --project GifConverter -c Release -- my.gif -o H:\
+   dotnet run --project GifConverter -c Release -- animations/my.gif -o H:\
    ```
 3. Unplug USB or press reset. The new animation joins the rotation.
 
